@@ -36,8 +36,9 @@ def load_csv(uploaded_file: io.BytesIO) -> pd.DataFrame:
         st.warning(f"{uploaded_file.name} に '日付' または '時刻' 列が見つかりません。")
         return pd.DataFrame()
 
-    # 2重ヘッダー対応
+    # 2重ヘッダー対応 + 「資料」などのラベル行を除外
     df = df[~df['日付'].str.contains('日付', na=False) & ~df['時刻'].str.contains('時刻', na=False)]
+    df = df[~df['日付'].str.contains('資料', na=False)]  # ← 追加：資料行を除外
 
     df['日付'] = df['日付'].astype(str).str.replace(r'[\s　\t\r\n]+', '', regex=True)
     df['時刻'] = df['時刻'].astype(str).str.replace(r'[\s　\t\r\n]+', '', regex=True)
