@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import io
 import time
+import unicodedata
+import re
 
 # 年2桁→4桁変換
 def convert_short_year_to_full(date_str: str) -> str:
@@ -12,23 +14,35 @@ def convert_short_year_to_full(date_str: str) -> str:
         return f"{year}/{parts[1]}/{parts[2]}"
     return date_str
 
-# CSV読み込みと前処理
+# カラム名の正規化（丸数字・全角・空白など削除）
+def normalize_column_name(col_name: str) -> str:
+    col_name = unicodedata.normalize('NFKC', col_name)
+    col_name = re.sub(r'[\s　\t\r\n①-⑳㉑-㉟⑴-⒇⓪-⓿①-⓾①-⑩]', '', col_name)
+    return col_name.lower()
+
+# CSV読み込みと前処理（エンコーディング自動判定付き）
 def load_csv(uploaded_file: io.BytesIO) -> pd.DataFrame:
-    try:
-        df = pd.read_csv(uploaded_file, dtype=str, encoding='utf-8', engine='pyarrow')
-    except Exception:
+    encodings_to_try = ['utf-8', 'cp932', 'shift_jis', 'utf-16', 'utf-8-sig', 'latin1']
+    df = None
+    for encoding in encodings_to_try:
         uploaded_file.seek(0)
         try:
-            df = pd.read_csv(uploaded_file, dtype=str, encoding='shift_jis', engine='c')
-        except Exception as e:
-            st.warning(f"{uploaded_file.name} の読み込みに失敗しました: {e}")
-            return pd.DataFrame()
+            df = pd.read_csv(uploaded_file, dtype=str, encoding=encoding, engine='python')
+            break
+        except Exception:
+            continue
 
-    df.columns = df.columns.str.strip().str.replace(r"\s+", "", regex=True).str.replace('　', '')
+    if df is None:
+        st.warning(f"{uploaded_file.name} の読み込みに失敗しました（対応できる文字コードが見つかりませんでした）")
+        return pd.DataFrame()
+
+    # カラム名の正規化とマッピング
+    normalized_columns = {col: normalize_column_name(col) for col in df.columns}
     rename_map = {
-        col: '日付' if '日付' in col or col.lower() in ['date', 'day']
-        else '時刻' if '時刻' in col or col.lower() == 'time'
-        else col for col in df.columns
+        col: '日付' if '日付' in norm or 'date' in norm or 'day' in norm
+        else '時刻' if '時刻' in norm or 'time' == norm
+        else col
+        for col, norm in normalized_columns.items()
     }
     df.rename(columns=rename_map, inplace=True)
 
@@ -194,6 +208,6 @@ def main():
         csv_bytes = generate_csv(merged_df)
         st.download_button('📥 ダウンロードはこちら', csv_bytes, file_name='filtered_interval_data.csv', mime='text/csv')
 
-# アプリ実行
+# 実行
 if __name__ == '__main__':
     main()
