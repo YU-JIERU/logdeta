@@ -4,6 +4,10 @@ import io
 import time
 import unicodedata
 import re
+import gc
+
+# 行数制限（1ファイルあたり）
+MAX_ROWS_PER_FILE = 10000
 
 # 年2桁→4桁変換
 def convert_short_year_to_full(date_str: str) -> str:
@@ -77,6 +81,12 @@ def load_csv(uploaded_file: io.BytesIO) -> pd.DataFrame:
     dt_str = df['日付'] + ' ' + df['時刻']
     df['datetime'] = pd.to_datetime(dt_str, errors='coerce')
     df.dropna(subset=['datetime'], inplace=True)
+
+    # 行数制限
+    if len(df) > MAX_ROWS_PER_FILE:
+        st.info(f"{uploaded_file.name} は {MAX_ROWS_PER_FILE} 行までに制限されます。")
+        df = df.iloc[:MAX_ROWS_PER_FILE]
+
     return df.reset_index(drop=True)
 
 # 間引き処理
@@ -99,23 +109,6 @@ def filter_by_interval(df: pd.DataFrame, interval_seconds: int) -> pd.DataFrame:
 
     return reduced.reset_index(drop=True)
 
-# マージ＆並び替え
-def merge_and_sort(dataframes: list[pd.DataFrame]) -> pd.DataFrame:
-    non_empty = [df for df in dataframes if not df.empty]
-    if not non_empty:
-        return pd.DataFrame()
-
-    merged = pd.concat(non_empty, ignore_index=True).drop_duplicates().sort_values('datetime').reset_index(drop=True)
-
-    if 'datetime' in merged.columns and '時刻' in merged.columns:
-        cols = list(merged.columns)
-        cols.remove('datetime')
-        time_idx = cols.index('時刻') + 1
-        cols.insert(time_idx, 'datetime')
-        merged = merged[cols]
-
-    return merged
-
 # CSVダウンロード用生成
 def generate_csv(df: pd.DataFrame) -> bytes:
     buf = io.StringIO()
@@ -137,6 +130,11 @@ def select_interval() -> int:
     option = st.selectbox('抽出間隔を選択', options, index=4)
     return seconds_map[option]
 
+# キャッシュ付きファイル読み込み関数
+@st.cache_data(show_spinner=False)
+def load_and_process_file(file: io.BytesIO) -> pd.DataFrame:
+    return load_csv(file)
+
 # アプリ本体
 def main():
     st.set_page_config(page_title='ログ整形 ᔦ--ᔨ', layout='centered', initial_sidebar_state='expanded')
@@ -153,61 +151,51 @@ def main():
 
         progress = st.progress(0)
         status_text = st.empty()
-
-        temp_dfs = []
-        start_time = time.time()
         total_files = len(uploaded_files)
 
-        # 読み込み処理
+        merged_df = pd.DataFrame()
+
+        start_time = time.time()
         for idx, file in enumerate(uploaded_files):
-            df = load_csv(file)
-            temp_dfs.append(df)
+            # 読み込み＋間引き
+            df = load_and_process_file(file)
+            reduced_df = filter_by_interval(df, interval_seconds)
 
-            progress_percent = int((idx + 1) / total_files * 30)
-            progress.progress(progress_percent)
+            # マージ
+            if not reduced_df.empty:
+                merged_df = pd.concat([merged_df, reduced_df], ignore_index=True)
 
-            status_text.text(
-                f"📄 ファイル読み込み中: {idx + 1}/{total_files} - {file.name} ({len(df)} 行)"
-            )
+            # メモリ解放
+            del df, reduced_df
+            gc.collect()
 
-        read_time = time.time() - start_time
+            # 進捗表示（軽量化）
+            if (idx + 1) % 3 == 0 or idx == total_files - 1:
+                progress_percent = int((idx + 1) / total_files * 90)
+                progress.progress(progress_percent)
 
-        if not any(not df.empty for df in temp_dfs):
-            st.warning('有効なデータがありません')
+            status_text.text(f"📄 処理中: {idx + 1}/{total_files} - {file.name}")
+
+        total_time = time.time() - start_time
+
+        if merged_df.empty:
+            st.warning("有効なデータがありませんでした。")
             st.stop()
 
-        # 間引き処理
-        start_time = time.time()
-        reduced_dfs = []
-        for idx, df in enumerate(temp_dfs):
-            reduced_df = filter_by_interval(df, interval_seconds)
-            reduced_dfs.append(reduced_df)
-
-            progress_percent = 30 + int((idx + 1) / len(temp_dfs) * 40)
-            progress.progress(progress_percent)
-
-            status_text.text(
-                f"🔧 間引き処理中: {idx + 1}/{len(temp_dfs)} ファイル目"
-            )
-
-        filter_time = time.time() - start_time
-
-        # 結合処理
-        start_time = time.time()
-        merged_df = merge_and_sort(reduced_dfs)
-        merge_time = time.time() - start_time
+        # 並び替え（最後だけ）
+        merged_df = merged_df.drop_duplicates().sort_values('datetime').reset_index(drop=True)
 
         progress.progress(100)
-        status_text.text('✅ 完了！')
+        status_text.text("✅ 完了！")
 
         st.success(
             f"処理完了！ 合計 {len(merged_df)} 件を抽出しました\n"
-            f"読み込み時間: {read_time:.2f}秒 | 間引き時間: {filter_time:.2f}秒 | 結合時間: {merge_time:.2f}秒"
+            f"処理時間: {total_time:.2f} 秒"
         )
 
         csv_bytes = generate_csv(merged_df)
         st.download_button('📥 ダウンロードはこちら', csv_bytes, file_name='filtered_interval_data.csv', mime='text/csv')
 
-# 実行
+
 if __name__ == '__main__':
     main()
